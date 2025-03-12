@@ -1,0 +1,872 @@
+---
+title: "Predicting Canadian Annual Income Through Census Data"
+date: "2025-03-12"
+output: html_document
+params:
+  first_version: "2023-04-19"
+  latest_version: "2025-03-12"
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+**First Version:** `r params$first_version`\
+**Latest Version:** `r params$latest_version`
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Version}
+version
+```
+
+```{r Library, message=FALSE}
+library(haven)
+library(ggplot2)
+library(randomForest)
+library(caret)
+library(cvms)
+library(ggimage)
+library(rsvg)
+library(ROCR)
+library(pROC)
+library(tibble)
+library(scales)
+library(dplyr)
+```
+
+# Dataset and Data Preparation
+
+## 2016 Census Public Use Microdata File (PUMF)
+
+Released by Statistics Canada, the 2016 Census Public Use Microdata File (PUMF) features 123 variables on various individual and family-level socioeconomic characteristics surveyed during the 2015-2016 Census.
+It includes a total of 930,421 observations representing 2.7% of the entire population living within Canadian territory at the time of the census.
+An estimated weight is also attached to each observation to represent the total number of people in the population that share the respondent’s characteristics.
+
+```{r ObtainData}
+cdata16_origin <- read_sav('./Census_2016_Individual_PUMF.sav')
+cdata16 <- cdata16_origin
+# total records
+nrow(cdata16)
+```
+
+## Dependent Variables
+
+There are 32 features under the income category in the 2016 census data that represent different measurements of the variable.
+The variable **TOTINC** (Total Income) has been chosen as the dependent variable since it is both a numerical attribute and represents income information at an individual level.
+The variable captures all sources of income, such as employment, pension, government transfer, and capital gains.
+
+```{r}
+table(cdata16$TotInc)
+```
+
+The range of TOTINC is from -\$50,000 to \$1,586,814, and there are 5,542 unavailable records (with value 88,888,888) and 188,605 records which are not applicable (with value 99,999,999).
+
+The reference period for information gathered on TOTINC is set in 2015, and that income information for respondents below the age of 15 were not gathered.
+Therefore, only the income of **respondents who are at or above 15 years old and worked in 2015** are examined as the target population in this analysis.
+
+To separate eligible observations that fit this criteria from the rest of the data set, the variable **WKSWRK** (Weeks worked in 2015), which illustrates the number of weeks an individual worked in 2015, is used to identify those who performed work in 2015.
+
+```{r}
+target <- subset(cdata16, TotInc!=88888888 & TotInc!=99999999 & WKSWRK!=0 & WKSWRK!=9)
+
+# remaining records
+nrow(target)
+```
+
+Regarding the variable WKSWRK, 16,035 records represent individuals who worked in 2016 only, while 391,418 records are marked as not applicable.
+These non-applicable records pertain to individuals who worked before 2015, never worked, or are under 15 years of age.
+
+After cleaning not applicable and not available data following our criteria, 416,396 observations were removed from the original total of 930,421 observations, leaving 514,025 records remaining as the target data set.
+
+Based on theoretical correlation with personal income and the percentage of usable data, **27 features** were chosen as predictor variables.
+**Due to the presence of pre-estimated weights, imputation is not implemented for missing values.**
+
+```{r}
+# delete all unusable data
+df2<-subset(target, AGEGRP!=88 & AGEGRP!=1 & AGEGRP!=2 & AGEGRP!=3 & AGEGRP!=4 & AGEGRP!=5 & GENSTAT!=8 
+            & IMMCAT5!=88 & CIP2011!=88 & CIP2011!=99 & HDGREE!=88 & HDGREE!=99 & TotInc!=88888888 
+            & TotInc!=99999999 & MOB1!=8 & MOB1!=9 & KOL!=8 & COW!=8 & COW!=9 & FPTWK!=8 & FPTWK!=9 
+            & LSTWRK!=9 & WKSWRK!=9 & WKSWRK!=0 & WKSWRK!=9 & BedRm!=8 & CONDO!=8 & DTYPE!=8 
+            & HCORENEED_IND!=888 & NOS!=8 & REPAIR!=8 & ROOMS!=88 & DPGRSUM!=88 & NAICS!=88 & NOCS!=88 
+            & CfSize!=8 & HHSIZE!=8)
+
+# records for modelling
+nrow(df2)
+
+# percentage representing target dataset based on weights
+percent_target=(sum(df2$WEIGHT)/sum(target$WEIGHT))*100; percent_target
+```
+
+After cleaning all the missing data among the predictor variables, 79,247 further observations were removed from the data set before the eventual analysis.
+The remaining sample size, **434,778, represents 84.58% of the target population** of our study, which once again constitutes all respondents who were at or above fifteen years of age during the time of the census and have worked in 2015.
+
+```{r}
+# data for analysis
+df3 <- df2[,c("WEIGHT", "AGEGRP", "MarStH", "Sex", "GENSTAT", "IMMCAT5", "CIP2011", "HDGREE", "TotInc", "MOB1", 
+              "KOL", "Citizen", "COW", "FPTWK", "LSTWRK", "WKSWRK", "BedRm", "CONDO", "DTYPE", "HCORENEED_IND", 
+              "NOS", "REPAIR", "ROOMS", "DPGRSUM", "NAICS", "NOCS", "CfSize", "HHSIZE", "DETH123")]
+
+# keep a dataset for coding in python
+df4 <- df3
+```
+
+```{r}
+# density curve with the histogram
+ggplot(df3, aes(x=TotInc, y=after_stat(density))) + 
+  geom_histogram(fill="lightblue", color="grey60", bins = 262) + 
+  geom_density() + ggtitle("Distribution of TotInc") +
+  xlab("Total income") + ylab("Density")
+```
+
+## Variable Type Conversion
+
+```{r}
+# check class
+sapply(df3, class)
+```
+
+```{r}
+# convert to factor
+cols <- c("AGEGRP", "MarStH", "Sex", "GENSTAT", "IMMCAT5", "CIP2011", "HDGREE", "MOB1", "KOL", "Citizen", "COW",
+          "FPTWK", "LSTWRK", "WKSWRK", "BedRm", "CONDO", "DTYPE", "HCORENEED_IND", "NOS", "REPAIR", "ROOMS", 
+          "DPGRSUM", "NAICS", "NOCS", "CfSize", "HHSIZE", "DETH123")
+
+df3[cols] <- lapply(df3[cols], as.factor)
+
+# confirm class
+sapply(df3, class)
+```
+
+All explanatory variables are categorical ones.
+
+```{r}
+str(df3)
+```
+
+## Training and Testing indicator
+
+```{r}
+# set seed for reproducibility
+set.seed(123)
+
+# leave 20% of dataset for testing
+test <- sample(c(FALSE, TRUE), nrow(df3), replace=TRUE, prob=c(0.8,0.2))
+
+# size of test set 
+sum(test)
+
+# size of training set
+train <- !test
+sum(train)
+```
+
+An **80-20 split** was applied to the dataset, resulting in 87,123 records in the test set and 347,655 records in the training set.
+
+# Models
+
+Individual weights associated with each observation are passed into all three kinds of models as the **weight parameter** to ensure that the results are generalisable to the entire Canadian population.
+
+## Regeression Model
+
+### Multiple Regression
+
+```{r}
+# fit the weighted multiple regression model
+MF <- lm(TotInc ~ AGEGRP + MarStH + Sex + GENSTAT + IMMCAT5 + CIP2011 + HDGREE + MOB1 + KOL + Citizen + COW 
+         + FPTWK + LSTWRK + WKSWRK + BedRm + CONDO + DTYPE+ HCORENEED_IND+ NOS+ REPAIR+ ROOMS + DPGRSUM 
+         + NAICS + NOCS + CfSize + HHSIZE + DETH123, weights = WEIGHT, data = df3, subset = train)
+
+# view the results
+summary(MF)
+```
+
+Multiple regression model returned a relatively low **R-squared score of 0.227**, signaling a poor fit that is capable of explaining only 22.7% of the variation in individual income.
+It thus be concluded that multiple regression is largely ineffective at producing accurate numerical predictions of income here.
+
+```{r}
+# residual plots
+res <- resid(MF)
+plot(fitted(MF), res)
+abline(0,0)
+plot(density(res))
+```
+
+## Classification Model
+
+Values of the income variable are first divided into **five bins** based on the **2015 federal income tax brackets** to render the dataset suitable for a classification approach.
+Another binning method that separates income into only **two categories** based on the data’s **median value of 44,000** is also implemented to serve as an additional classification test.
+
+```{r}
+# decide intervals for 5 bins
+table(df3$TotInc)
+```
+
+The range of TOTINC spans from -\$48,000 to \$1,586,814, with a median of \$44,000.
+
+```{r}
+# calculate the median value of TotInc
+median(df3$TotInc)
+```
+
+### Random Forest
+
+#### Five Bins
+
+Income levels and ranges for each bin is as follows:
+
+• Low: \$0 or less
+
+• Low-Medium: \$1 to \$44,701
+
+• Medium: \$44,702 to \$89,401
+
+• Medium-High: \$89,402 to \$138,586
+
+• High: Over \$138,586
+
+```{r}
+# create breaks for the cut function
+breaks5 <- c(-60000, 10, 44701, 89401, 138586, 1600000)
+
+# minimum -48000/maximum 1586814 -> set -60000/1600000 as the first/last value in breaks
+# based on 2015 Federal Tax Brackets[44,701(included) 89,401(included) 138,586(included) over]
+
+# Values that would have been rounded to zero have been replaced by 1 or -1. 
+# numbers of records: -1(76) 1(2016) 
+# next value: 1000 -> set 10 as the second value in breaks -> low: under zero
+# values near 44,701: 44,000 and 45,000 -> set 44,701 -> Low-Medium
+# values near 89,401: 89,000 and 90,000 -> set 89,401 -> Medium
+# values near 138,586: 130,000 and 140,000 -> set 138,586 -> Medium-High
+```
+
+```{r}
+# create labels for the new factor variable
+labels5 <- c("Low", "Low-Medium", "Medium", "Medium-High", "High")
+```
+
+```{r}
+# categorize the values in TotInc and create a new variable
+df3$TotInc5 <- cut(df3$TotInc, breaks = breaks5, labels = labels5)
+
+summary(df3$TotInc5)
+```
+
+It should be noted that the number of observations in each bracket is **not evenly divided**.
+A total of 216,348 observations fall into the low-medium category and another 147,934 belong to the medium category.
+
+```{r}
+train_weights <- df3$WEIGHT[train]
+
+set.seed(123)
+
+RF5 <- randomForest(TotInc5 ~ AGEGRP + MarStH + Sex + GENSTAT + IMMCAT5 + CIP2011 + HDGREE + MOB1 + KOL + Citizen 
+                    + COW + FPTWK + LSTWRK + WKSWRK + BedRm + CONDO + DTYPE + HCORENEED_IND + NOS+ REPAIR+ ROOMS 
+                    + DPGRSUM + NAICS + NOCS + CfSize + HHSIZE + DETH123, 
+                    data = df3, subset = train, weights = train_weights, ntree=10)
+
+# result
+print(RF5)
+```
+
+```{r}
+# predicted class
+RF5.pred <- predict(RF5, newdata=subset(df3,test), type="class")
+
+# confusion matrix
+test.ct5 <- table(Predicted=RF5.pred, Actual=df3$TotInc5[test]); test.ct5
+```
+
+```{r}
+# Accuracy
+sum(diag(test.ct5)) / sum(test.ct5) 
+```
+
+```{r}
+# library(ggimage)
+# library(rsvg)
+# library(cvms)
+cm5_se <- confusion_matrix(targets = df3$TotInc5[test], predictions = RF5.pred)
+plot_confusion_matrix(cm5_se$`Confusion Matrix`[[1]],  
+                      class_order =  c("Low", "Low-Medium", "Medium", "Medium-High", "High"),
+                      add_row_percentages = FALSE, 
+                      add_normalized = FALSE,
+                      font_col_percentages = font(size = 3), 
+                      add_arrows = FALSE)
+```
+
+```{r}
+# get the variable importance
+var_imp5 <- importance(RF5); print(var_imp5)
+```
+
+```{r}
+# get variables first
+varImpPlot(RF5, sort = TRUE, n.var = 7, main="")
+```
+
+```{r}
+varImpPlot(RF5, sort = T, n.var = 7, main = "Importance of Features (5 bins)", 
+           labels=c("Weeks worked", "Field of study", "Highest degree", "# of rooms", "Occupation", 
+                    "Age group","Industry sector"))
+```
+
+```{r}
+# calculate precision for each class
+precision5 <- diag(test.ct5) / colSums(test.ct5); precision5
+```
+
+#### Two Bins
+
+```{r}
+# create breaks for the cut function
+break2 <- c(-60000, 44701, 1600000)
+
+# create labels for the new factor variable
+label2 <- c("<= $44K", "Over $44K")
+
+# categorize the values in TotInc
+df3$TotInc2 <- cut(df3$TotInc, breaks = break2, labels = label2)
+
+summary(df3$TotInc2)
+```
+
+Income observations are split into two categories, with 219,023 having a total income lower or equal to the median value of \$44,000 and 215,755 having an income above it.
+
+```{r}
+train_weights <- df3$WEIGHT[train]
+
+set.seed(2023)
+RF2 <- randomForest(TotInc2 ~ AGEGRP + MarStH + Sex + GENSTAT + IMMCAT5 + CIP2011 + HDGREE + MOB1 + KOL + Citizen 
+                    + COW + FPTWK + LSTWRK + WKSWRK + BedRm + CONDO + DTYPE + HCORENEED_IND + NOS + REPAIR 
+                    + ROOMS + DPGRSUM + NAICS + NOCS + CfSize + HHSIZE + DETH123, 
+                    data = df3, subset = train, weights = train_weights, ntree=10)
+
+print(RF2)
+```
+
+```{r}
+RF2.pred <- predict(RF2, newdata=subset(df3,test), type="class")
+RF2.prob <- predict(RF2, newdata=subset(df3,test), type="prob") 
+
+# library(ROCR)
+par(pty = "s")
+plot(performance(prediction(RF2.prob[,2], df3$TotInc2[test]), "tpr", "fpr"),
+     main = "ROC Curve for Random Forest", lwd= 3, col="lightblue") 
+abline(a=0, b= 1, lty=3, lwd = 2)
+```
+
+```{r}
+test.ct2 <- table(Predicted=RF2.pred, Actual=df3$TotInc2[test]); test.ct2
+```
+
+```{r}
+# accuracy
+sum(diag(test.ct2)) / sum(test.ct2) 
+```
+
+```{r}
+# calculate precision for each class
+precision <- diag(test.ct2) / rowSums(test.ct2); precision
+```
+
+```{r, message=FALSE}
+# library(ggimage)
+# library(rsvg)
+# library(cvms)
+cm2_se <- confusion_matrix(targets = df3$TotInc2[test], predictions = RF2.pred)
+
+plot_confusion_matrix(cm2_se$`Confusion Matrix`[[1]],  class_order = c("<= $44K", "Over $44K"),
+                      add_row_percentages = FALSE, add_normalized = FALSE,
+                      font_col_percentages = font(size = 3), add_arrows = FALSE)
+```
+
+```{r}
+# get the variable importance
+var_imp2 <- importance(RF2); print(var_imp2)
+```
+
+```{r}
+varImpPlot(RF2, sort = TRUE, n.var = 7, main="")
+```
+
+```{r}
+varImpPlot(RF2, sort = T, n.var = 7, main = "Importance of Features (2 bins)", 
+           labels=c("Weeks worked","# of rooms", "Highest degree", "Full/part time", 
+                    "Occupation", "Industry sector", "Age group"))
+```
+
+```{r}
+# precision of 0
+p2_0 = test.ct2[1, 1] / sum(test.ct2[1, ]); p2_0
+# recall of 0
+r2_0 = test.ct2[1, 1] / sum(test.ct2[,1]); r2_0
+# F-1 score of 0
+f2_0 = 2 * p2_0  * r2_0 / (p2_0 + r2_0); f2_0
+```
+
+```{r}
+# precision of 1
+p2_1 = test.ct2[2, 2] / sum(test.ct2[2, ]); p2_1
+# recall of 1
+r2_1 = test.ct2[2, 2] / sum(test.ct2[, 2]); r2_1
+# F-1 score of 1
+f2_1 = 2 * p2_1 * r2_1 / (p2_1 + r2_1); f2_1
+```
+
+### Naive Bayes
+
+Since R does not have a suitable package for handling weights in Naive Bayes modeling, Python was used instead, utilizing the Scikit-learn library.
+The objective here is to create an appropriate dataset while **ensuring that the training and test sets remain consistent** for the modeling process in Python.
+
+#### Create Suitable Variables
+
+```{r}
+sapply(df4, class)
+```
+
+```{r}
+#change labels
+levels(df3$AGEGRP)
+```
+
+```{r}
+df4$AGEGRP <- factor(df4$AGEGRP,
+                     levels=c("6" , "7" , "8" , "9" , "10", "11", "12", "13" ,"14", "15" ,"16" ,"17" ,"18", 
+                              "19", "20" ,"21"),
+                     labels=c("0","1","2","3","4","5","6" , "7" , "8" , "9" , "10", "11", "12", "13" ,"14", 
+                              "15"))
+
+table(df4$AGEGRP)
+```
+
+```{r}
+levels(df3$MarStH)
+```
+
+```{r}
+df4$MarStH <- factor(df4$MarStH,
+                     levels = c("1", "2", "3", "4", "5", "6"),
+                     labels = c("0", "1", "2", "3", "4", "5"))
+```
+
+```{r}
+levels(df3$Sex)
+```
+
+```{r}
+df4$Sex <- factor(df4$Sex,
+                  levels = c("1", "2"),
+                  labels = c("0", "1"))
+```
+
+```{r}
+levels(df3$GENSTAT)
+```
+
+```{r}
+df4$GENSTAT <- factor(df4$GENSTAT,
+                      levels = c("1", "2", "3", "4"),
+                      labels = c("0", "1", "2", "3"))
+```
+
+```{r}
+levels(df3$IMMCAT5)
+```
+
+```{r}
+df4$IMMCAT5 <- factor(df4$IMMCAT5,
+                      levels = c("1",  "2",  "3",  "21", "22", "23"),
+                      labels = c("0", "1",  "2",  "3", "4", "5"))
+```
+
+```{r}
+levels(df3$CIP2011)
+```
+
+```{r}
+df4$CIP2011 <- factor(df4$CIP2011,
+                      levels = c("1", "2",  "3",  "4",  "5",  "6",  "7",  "8",  "9",  "10", "11", "13"),
+                      labels = c("0", "1",  "2",  "3",  "4",  "5",  "6",  "7",  "8",  "9",  "10", "11"))
+```
+
+```{r}
+levels(df3$HDGREE)
+```
+
+```{r}
+df4$HDGREE <- factor(df4$HDGREE,
+                     levels = c("1", "2",  "3",  "4",  "5",  "6",  "7",  "8",  "9",  "10", "11", "12", "13"),
+                     labels = c("0", "1",  "2",  "3",  "4",  "5",  "6",  "7",  "8",  "9",  "10", "11", "12"))
+```
+
+```{r}
+levels(df3$MOB1)
+```
+
+```{r}
+df4$MOB1 <- factor(df4$MOB1,
+                   levels = c("1", "2",  "3",  "4",  "5",  "6"),
+                   labels = c("0", "1",  "2",  "3",  "4",  "5"))
+```
+
+```{r}
+levels(df3$KOL)
+```
+
+```{r}
+df4$KOL <- factor(df4$KOL,
+                  levels = c("1", "2",  "3",  "4"),
+                  labels = c("0", "1",  "2",  "3"))
+```
+
+```{r}
+levels(df3$Citizen)
+```
+
+```{r}
+df4$Citizen <- factor(df4$Citizen,
+                      levels = c("1", "2",  "3"),
+                      labels = c("0", "1",  "2"))
+```
+
+```{r}
+levels(df3$COW)
+```
+
+```{r}
+df4$COW <- factor(df4$COW,
+                  levels = c("1", "2",  "3",  "4",  "5",  "6"),
+                  labels = c("0", "1",  "2",  "3",  "4",  "5"))
+```
+
+```{r}
+levels(df3$FPTWK)
+```
+
+```{r}
+df4$FPTWK <- factor(df4$FPTWK,
+                    levels = c("1", "2"),
+                    labels = c("0", "1"))
+```
+
+```{r}
+levels(df3$LSTWRK)
+```
+
+```{r}
+df4$LSTWRK <- factor(df4$LSTWRK,
+                     levels = c("2", "3"),
+                     labels = c("0", "1"))
+```
+
+```{r}
+levels(df3$WKSWRK)
+```
+
+```{r}
+df4$WKSWRK <- factor(df4$WKSWRK,
+                     levels = c("1", "2",  "3",  "4",  "5",  "6"),
+                     labels = c("0", "1",  "2",  "3",  "4",  "5"))
+```
+
+```{r}
+levels(df3$BedRm)
+df4$BedRm <- factor(df4$BedRm)
+```
+
+```{r}
+levels(df3$CONDO)
+df4$CONDO <- factor(df4$CONDO)
+```
+
+```{r}
+levels(df3$DTYPE)
+```
+
+```{r}
+df4$DTYPE <- factor(df4$DTYPE,
+                    levels = c("1", "2",  "3"),
+                    labels = c("0", "1",  "2"))
+```
+
+```{r}
+levels(df3$HCORENEED_IND)
+```
+
+```{r}
+df4$HCORENEED_IND <- factor(df4$HCORENEED_IND,
+                            levels = c("0", "100"),
+                            labels = c("0", "1"))
+```
+
+```{r}
+levels(df3$NOS)
+df4$NOS <- factor(df4$NOS)
+```
+
+```{r}
+levels(df3$REPAIR)
+```
+
+```{r}
+df4$REPAIR <- factor(df4$REPAIR,
+                     levels = c("1", "2",  "3"),
+                     labels = c("0", "1",  "2"))
+```
+
+```{r}
+levels(df3$ROOMS)
+```
+
+```{r}
+df4$ROOMS <- factor(df4$ROOMS,
+                    levels = c("1", "2",  "3",  "4",  "5",  "6",  "7",  "8",  "9",  "10", "11"),
+                    labels = c("0", "1",  "2",  "3",  "4",  "5",  "6",  "7",  "8",  "9",  "10"))
+```
+
+```{r}
+levels(df3$DPGRSUM)
+```
+
+```{r}
+df4$DPGRSUM <- factor(df4$DPGRSUM,
+                      levels = c("1", "2",  "3",  "4",  "5",  "6",  "7",  "8",  "9",  "10", "11", "12", "13", 
+                                 "14", "15"),
+                      labels = c("0", "1",  "2",  "3",  "4",  "5",  "6",  "7",  "8",  "9",  "10", "11", "12",
+                                 "13", "14"))
+```
+
+```{r}
+levels(df3$NAICS)
+```
+
+```{r}
+df4$NAICS <- factor(df4$NAICS,
+                    levels = c("1", "2",  "3",  "4",  "5",  "6",  "7",  "8",  "9",  "10", "11", "12", "13", "14", 
+                               "15", "16", "17","18","19"),
+                    labels = c("0", "1",  "2",  "3",  "4",  "5",  "6",  "7",  "8",  "9",  "10", "11", "12", "13",
+                               "14", "15", "16", "17","18"))
+```
+
+```{r}
+levels(df3$NOCS)
+```
+
+```{r}
+df4$NOCS <- factor(df4$NOCS,
+                   levels = c("1", "2",  "3",  "4",  "5",  "6",  "7",  "8",  "9",  "10"),
+                   labels = c("0", "1",  "2",  "3",  "4",  "5",  "6",  "7",  "8",  "9"))
+```
+
+```{r}
+levels(df3$CfSize)
+```
+
+```{r}
+df4$CfSize <- factor(df4$CfSize,
+                     levels = c("1", "2",  "3",  "4",  "5",  "6",  "7"),
+                     labels = c("0", "1",  "2",  "3",  "4",  "5",  "6"))
+```
+
+```{r}
+levels(df3$HHSIZE)
+```
+
+```{r}
+df4$HHSIZE <- factor(df4$HHSIZE,
+                     levels = c("1", "2",  "3",  "4",  "5",  "6",  "7"),
+                     labels = c("0", "1",  "2",  "3",  "4",  "5",  "6"))
+```
+
+```{r}
+levels(df3$DETH123)
+```
+
+```{r}
+df4$DETH123 <- factor(df4$DETH123,
+                      levels = c("1", "2"),
+                      labels = c("0", "1"))
+```
+
+```{r}
+str(df4)
+```
+
+#### Create and save training and test sets
+
+```{r}
+# categorize the values in TotInc and create a new variable (5 bins)
+df4$TotInc5 <- cut(df4$TotInc, breaks = breaks5, labels = labels5)
+
+# categorize the values in TotInc and create a new variable (2 bins)
+df4$TotInc2 <- cut(df4$TotInc, breaks = break2, labels = label2)
+```
+
+```{r}
+# obtain and save training data
+table(train)
+df4.train <- subset(df4, train)
+write.csv(df4.train, "df4-train.csv", row.names = FALSE)
+
+# obtain and save testing data
+df4.test <- subset(df4, test)
+write.csv(df4.test, "df4-test.csv", row.names = FALSE)
+```
+
+#### Modelling Process
+
+Check **NaiveBayes.ipynb** for details.
+
+# Income Distribution Across Important Features (5 bins)
+
+As an extension of findings on variable importance, the analysis here examines income distribution by features that possessed the greatest mean decrease in Gini.
+The following bar plots thus represent how income is distributed across the categories of each feature for the Canadian population as a whole based on the distribution of available observations in our target data set.
+
+## Industry Sector and Income Distribution
+
+```{r}
+# number of sample
+table(df3$NAICS,df3$TotInc5)
+```
+
+```{r}
+sum(table(df3$NAICS,df3$TotInc5))
+```
+
+```{r, fig.width=12, fig.height=5}
+indu<-df3[,c("WEIGHT","TotInc5","NAICS")]
+
+dfff <- indu %>%
+  mutate(Industry = recode(NAICS, "1" = "Agriculture, forestry, fishing and hunting",
+                           "2" = "Mining, quarrying, and oil and gas extraction",
+                           "3" = "Utilities",
+                           "4" = "Construction",
+                           "5" = "Manufacturing",
+                           "6" = "Wholesale trade",
+                           "7" = "Retail trade",
+                           "8" = "Transportation and warehousing",
+                           "9" = "Information and cultural industries",
+                           "10" = "Finance and insurance/55 Management of companies and enterprises",
+                           "11" = "Real estate and rental and leasing",
+                           "12" = "Professional, scientific and technical services",
+                           "13" = "Administrative and support, waste management and remediation services",
+                           "14" = "Educational services",
+                           "15" = "Health care and social assistance",
+                           "16" = "Arts, entertainment and recreation",
+                           "17" = "Accommodation and food services",
+                           "18" = "Other services (except public administration)",
+                           "19"= "Public administration"))
+colnames(dfff)[2]<-"Levels"
+
+ggplot(data=dfff, aes(x=Industry, y=WEIGHT, fill=Levels)) +
+  geom_bar(stat="identity")  +
+  ylab("Population in Millions") + 
+  scale_y_continuous(labels = unit_format(unit = "M", scale = 1e-6))+
+  coord_flip()
+```
+
+It can be seen that those working in the **professional, scientific, and technical services sector** as well as the **public administration sectors** tend to have the highest rate of belonging to the medium-high and high income categories, while **retail trade and accommodation and food services** are most heavily populated by those in the low-medium income bracket or below.
+
+## Occupation and Income Distribution
+
+```{r, fig.width=12, fig.height=5}
+ococ<-df3[,c("WEIGHT","TotInc5","NOCS")]
+
+occupation <- ococ %>%
+  mutate(Occupation = recode(NOCS, "1" = "Management occupations",
+                             "2" = "Business, finance and administrative occupations",
+                             "3" = "Natural and applied sciences and related occupations",
+                             "4" = "Health occupations",
+                             "5" = "Occupations in social science, education, government service and religion",
+                             "6" = "Occupations in art, culture, recreation and sport",
+                             "7" = "Sales and service occupations",
+                             "8" = "Trades, transport and equipment operators and related occupations",
+                             "9" = "Occupations unique to primary industry",
+                             "10" = "Occupations unique to processing, manufacturing and utilities"))
+
+colnames(occupation)[2]<-"Levels"
+
+ggplot(data=occupation, aes(x=Occupation, y=WEIGHT, fill=Levels)) +
+  geom_bar(stat="identity")  +
+  ylab("Population in Millions") + 
+  scale_y_continuous(labels = unit_format(unit = "M", scale = 1e-6))+
+  coord_flip()
+```
+
+Canadians with jobs in **management, business, finance, and administrative sections** tend to have the highest income, whereas those with the lowest income are more likely to be **occupying jobs in the sales and services sector**.
+
+## Highest Degree Obtained and Income Distribution
+
+```{r, fig.width=12, fig.height=5}
+deg<-df3[,c("WEIGHT","TotInc5","HDGREE")]
+
+degree <- deg %>%
+  mutate(Degree = recode(HDGREE, "1" = "No certificate, diploma or degree",
+                      "2" = "Secondary (high) school diploma or equivalency certificate",
+                      "3" = "Trades certificate or diploma other than Certificate of \n Apprenticeship or Certificate of Qualification",
+                      "4" = "Certificate of Apprenticeship or Certificate of Qualification",
+                      "5" = "Program of 3 months to less than 1 year \n (College, CEGEP and other non-university certificates or diplomas)",
+                      "6" = "Program of 1 to 2 years \n (College, CEGEP and other non-university certificates or diplomas)",
+                      "7" = "Program of more than 2 years \n (College, CEGEP and other non-university certificates or diplomas)",
+                      "8" = "University certificate or diploma below bachelor level",
+                      "9" = "Bachelor's degree",
+                      "10" = "University certificate or diploma above bachelor level",
+                      "11" = "Degree in medicine, dentistry, veterinary medicine or optometry",
+                      "12" = "Master's degree",
+                      "13"="Earned doctorate"))
+
+colnames(degree)[2]<-"Levels"
+
+ggplot(data=degree, aes(x=Degree, y=WEIGHT, fill=Levels)) +
+  geom_bar(stat="identity")  + xlab("Highest certificate, diploma or degree")+
+  ylab("Population in Millions") + 
+  scale_y_continuous(labels = unit_format(unit = "M", scale = 1e-6))+
+  coord_flip() 
+```
+
+Those with **secondary education or below** are most likely to fall into low-medium and low income brackets, while **masters, doctorates, and degrees in the medical industry** have proportionately higher income.
+It is also worth noting that **earning a Bachelor’s degree** marks a somewhat significant increase in one’s probability of being in the medium-high bracket or above compared to holding a lower degree.
+
+## Age and Income Distribution
+
+```{r, fig.width=12, fig.height=5}
+ageage<-df3[,c("WEIGHT","TotInc5","AGEGRP")]
+
+age <- ageage %>%
+  mutate(Age = recode(AGEGRP, 
+                      "1" = "0-4",
+                      "2" = "5-6",
+                      "3" = "7-9",
+                      "4" = "10-11",
+                      "5" = "12-14",
+                      "6" = "15-17",
+                      "7" = "18-19",
+                      "8" = "20-24",
+                      "9" = "25-29",
+                      "10" = "30-34",
+                      "11" = "35-39",
+                      "12" = "40-44",
+                      "13" = "45-49",
+                      "14" = "50-54",
+                      "15" = "55-59",
+                      "16" = "60-64",
+                      "17" = "65-69",
+                      "18" = "70-74",
+                      "19" = "75-79",
+                      "20" = "80-84",
+                      "21" = ">=85"))
+
+colnames(age)[2]<-"Levels"
+
+ggplot(data=age, aes(x=Age, y=WEIGHT, fill=Levels)) +
+  geom_bar(stat="identity")  + xlab("Age (years)")+
+  ylab("Population in Millions") + 
+  scale_y_continuous(labels = unit_format(unit = "M", scale = 1e-6))+
+  coord_flip()
+```
+
+Income tends to rise the fastest when one enters their **mid-twenties** and begins to drop after **55 years of age**.
+
+
