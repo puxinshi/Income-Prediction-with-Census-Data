@@ -6,8 +6,10 @@ This project aims to build a predictive model for Canadians’ income level usin
 ## Data Source
 The dataset for this project is the 2016 Census of Population Public Use Microdata File (individuals file), which includes 930,421 observations and 123 individual and family-related socioeconomic features, along with an estimated weight that is attached to each observation to ensure the sample’s representativeness of the population.
 
-- **Individuals File, 2016 Census of Population (Public Use Microdata Files):** https://www150.statcan.gc.ca/n1/en/catalogue/98M0001X
-- **Data used in Script:** https://drive.google.com/drive/folders/1FhMfnrzSOSr8AYdLHpUS9w-ELeAWoyug?usp=drive_link
+- **Individuals File, 2016 Census of Population (Public Use Microdata Files):**
+  https://www150.statcan.gc.ca/n1/en/catalogue/98M0001X
+- **Data used in Script:**
+  https://drive.google.com/drive/folders/1FhMfnrzSOSr8AYdLHpUS9w-ELeAWoyug?usp=drive_link
 
 ## Tools & Libraries 
 - **R**: `Rmd`, `haven`, `ggplot2`, `randomForest`, `caret`, `cvms`, `ggimage`, `rsvg`, `ROCR`, `pROC`, `tibble`, `scales`, `dplyr`  
