@@ -18,7 +18,7 @@ The dataset for this project is the 2016 Census of Population Public Use Microda
 ## Machine Learning Models  
 - **Regression**: `Multiple Regression`
 - **Classification**: `Random Forest`, `Naive Bayes`
-- **Evaluation Metrics**: `R-squared Score`, `ROC`, `Precision`, `Recall`, `F1 Score`, `Confusion Matrix`
+- **Evaluation Metrics**: `R-squared Score`, `ROC`, `Accuracy`, `Precision`, `Recall`, `F1 Score`, `Confusion Matrix`
 
 ## Descriptive Analytics  
 To understand the income distribution in Canada, this project analyzes income patterns across four key features:  
